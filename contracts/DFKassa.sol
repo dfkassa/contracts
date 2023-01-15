@@ -1,112 +1,104 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 pragma solidity =0.8.17;
 
-import "./interfaces/IConfigureMe.sol";
-import "./interfaces/IRouter.sol";
-import "./interfaces/IDFKassa.sol";
-import "./interfaces/ITracker.sol";
-import "./interfaces/ITreasury.sol";
+import "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 
-contract DFKassa is IDFKassa {
-    address public router;
 
-    Payment[] private __payments;
+contract DFKassa {
+    address public immutable dfk;
+    address public protoRewardsReciever;
+    bytes32 public currentSecret;
 
-    constructor(address _router) {
-        router = _router;
-    }
+    uint256 public constant PROTOCOL_FEES_REWARD = 30_000;
+    uint256 public constant DFK_PAYMENT_DISCOUNT = 10_000;
+    uint256 public constant DFK_RECIEVING_CASHBACK = 10_000;
 
-    receive() external payable {}
+    event NewPayment(
+        uint256 indexed payload,
+        address indexed to,
+        uint256 amount,
+        address token,
+        uint256 merchantCashback,
+        uint256 protocolReward
+    );
 
-    function payments(
-        uint256 _index
-    ) external view override returns (Payment memory) {
-        return __payments[_index];
+    constructor(
+        address _dfk,
+        bytes32 _currentSecret
+    ) {
+        dfk = _dfk;
+        protoRewardsReciever = msg.sender;
+        currentSecret = _currentSecret;
     }
 
     function pay(
-        address _to,
+        address payable _to,
         address _token,
         uint256 _amount,
         uint256 _payload
-    ) public payable {
+    ) public virtual payable {
         require(_amount != 0, "Payment amount cannot be zero");
         require(_to != address(0), "Payment receiver cannot be zero address");
 
-        IRouter _routerContract = IRouter(router);
-        IConfigureMe _configContract = IConfigureMe(_routerContract.config());
-        ITracker _trackerContract = ITracker(_routerContract.tracker());
-
-        uint256 _visitorTxFee = _configContract.visitorTxGasFee() * tx.gasprice;
-
-        if (_token == _routerContract.dfk()) {
-            _visitorTxFee -= _configContract.dfkPaymentFeesDiscount();
-        }
-        require(
-            msg.value >= _visitorTxFee,
-            "Provide protocol fee to complete the payment"
-        );
+        uint256 _protocolReward;
+        uint256 _merchantCashback;
 
         if (_token == address(0)) {
             require(
-                _amount + _visitorTxFee <= msg.value,
-                "Payment amount + protocol fee should be less or equal passed value"
+                _amount + PROTOCOL_FEES_REWARD * tx.gasprice <= msg.value,
+                "Passed value should be greater or equal payment amount + protocol fee"
             );
             payable(_to).transfer(_amount);
-            _visitorTxFee += msg.value - _visitorTxFee - _amount;
+            _protocolReward = msg.value - _amount;
         } else {
+            uint256 _expectedFee = PROTOCOL_FEES_REWARD;
+            if (_token == dfk) {
+                _expectedFee -= DFK_PAYMENT_DISCOUNT;
+                _merchantCashback = DFK_RECIEVING_CASHBACK * tx.gasprice;
+            } else {
+                _merchantCashback = 0;
+            }
+            require(
+                _expectedFee * tx.gasprice <= msg.value,
+                "Passed value should be greater or equal required protocol fee"
+            );
             IERC20 _erc20Contract = IERC20(_token);
             _erc20Contract.transferFrom(msg.sender, _to, _amount);
-            _visitorTxFee += msg.value - _visitorTxFee;
+            _protocolReward = msg.value;
         }
 
-        payable(address(this)).transfer(_visitorTxFee);
-        _trackerContract.increaseTotalCollectedFees(_visitorTxFee);
+        if (_merchantCashback > 0)
+            _to.transfer(_merchantCashback);
 
-        Payment memory newPayment = Payment({
-            from: msg.sender,
-            to: _to,
-            token: _token,
-            amount: _amount,
-            payload: _payload,
-            ts: block.timestamp,
-            protocolFee: _visitorTxFee
+        payable(protoRewardsReciever).transfer(_protocolReward - _merchantCashback);
 
-        });
-        __payments.push(newPayment);
-        _mintVMDFKRewards(__payments[__payments.length - 1]);
-        // userPayments[msg.sender].push(paymentsCount);
-
-        emit NewPayment(newPayment);
+        emit NewPayment(
+            _payload,
+            _to,
+            _amount,
+            _token,
+            _merchantCashback,
+            _protocolReward
+        );
     }
 
-    function collectFees(address _reciever, uint256 _epoch) public virtual override {
-        IRouter _routerContract = IRouter(router);
-        ITracker _trackerContract = ITracker(_routerContract.tracker());
-
-        uint256 _amountToWithdraw = _trackerContract.userAvailableFees(_epoch, _reciever);
-        payable(_reciever).transfer(_amountToWithdraw);
+    function setProtoRewardsReciever(
+        address _newAccount,
+        bytes memory _beforeSecret,
+        bytes32 _newSecret,
+        uint8 _v,
+        bytes32 _r,
+        bytes32 _s
+    ) public virtual {
+        address _signer = ecrecover(
+            bytes32("transfer proto rewards reciever"),
+            _v,
+            _r,
+            _s
+        );
+        require(_signer == protoRewardsReciever, "Message should be signed by current reciever");
+        require(keccak256(_beforeSecret) == currentSecret, "Secrets are not the same");
+        currentSecret = _newSecret;
+        protoRewardsReciever = _newAccount;
     }
-
-    function _mintVMDFKRewards(Payment memory _payment) private {
-        IRouter _routerContract = IRouter(router);
-        IConfigureMe _configContract = IConfigureMe(_routerContract.config());
-        ITracker _trackerContract = ITracker(_routerContract.tracker());
-        ITreasury _trausuryContract = ITreasury(_routerContract.treasury());
-
-        uint256 vPointsMint = 1 ether;
-        uint256 mPointsMint = 1 ether;
-
-        vPointsMint += _trausuryContract.userExtraVMDFK(_payment.from);
-        mPointsMint += _trausuryContract.userExtraVMDFK(_payment.to);
-
-        if (_payment.token == _routerContract.dfk()) {
-            vPointsMint += _configContract.dfkPaymentExtraVDFKPoints();
-            mPointsMint += _configContract.dfkReceivingExtraMDFKPoints();
-        }
-
-        _trackerContract.mintVPoints(_payment.from, vPointsMint);
-        _trackerContract.mintMPoints(_payment.to, mPointsMint);
-    }
-
 }

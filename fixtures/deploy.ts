@@ -1,53 +1,39 @@
-import { ethers } from "hardhat";
+import hre, { ethers } from "hardhat";
+
+
+function _fetchSecretFor(chainId: number): string {
+    switch (chainId) {
+        case 31337:
+            return process.env.DFKASSA_CONTRACTS_HARDHAT_SECRET!
+        case 5:
+            return process.env.DFKASSA_CONTRACTS_ETH_GOERLI_SECRET!
+    }
+    throw Error(`Secret does not provided for such chain id: ${chainId}`)
+}
 
 export async function deployFixture() {
-
-    const RouterV1 = await ethers.getContractFactory("RouterV1");
+    const chainId = hre.network.config.chainId!;
 
     const DFK = await ethers.getContractFactory("DFK");
-    const vDFK = await ethers.getContractFactory("vDFK");
-    const mDFK = await ethers.getContractFactory("mDFK");
-    const pDFK = await ethers.getContractFactory("pDFK");
-
     const DFKassa = await ethers.getContractFactory("DFKassa");
-    const ConfigureMe = await ethers.getContractFactory("ConfigureMe");
-    const Tracker =  await ethers.getContractFactory("Tracker");
-    const Treasury =  await ethers.getContractFactory("Treasury");
 
-    const routerV1 = await RouterV1.deploy();
     const dfk = await DFK.deploy();
-    const pdfk = await pDFK.deploy(routerV1.address);
-    const vdfk = await vDFK.deploy(routerV1.address);
-    const mdfk = await mDFK.deploy(routerV1.address);
-    const dfkassa = await DFKassa.deploy(routerV1.address);
-    const tracker = await Tracker.deploy(routerV1.address);
-    const treasury = await Treasury.deploy(routerV1.address);
-    const configureMe = await ConfigureMe.deploy();
 
-
-    await routerV1.init(
+    // TODO: secret from env
+    const dfkassa = await DFKassa.deploy(
         dfk.address,
-        mdfk.address,
-        vdfk.address,
-        pdfk.address,
-
-        dfkassa.address,
-        configureMe.address,
-        treasury.address,
-        tracker.address
+        ethers.utils.keccak256(ethers.utils.toUtf8Bytes(_fetchSecretFor(chainId)))
     );
 
-    console.log(`Succesfully deployed and initilized RouterV1 at ${routerV1.address}`);
+    await dfk.deployed;
+    await dfkassa.deployed;
+
+    console.log(`[ Contract addresses ]`);
+    console.log(`DFKassa: ${dfkassa.address}`);
+    console.log(`DFK ${dfk.address}`);
 
     return {
-        routerV1,
-        dfk,
-        pdfk,
-        vdfk,
-        mdfk,
         dfkassa,
-        tracker,
-        treasury,
-        configureMe,
+        dfk,
     }
 }
